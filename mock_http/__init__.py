@@ -263,6 +263,13 @@ class MockHTTP(object):
         expectation = Expectation(self, method, path, *args, **kwargs)
         self.expected[method][path] = expectation
         return expectation
+
+    def shutdown(self):
+        """Close down the server""" 
+        self.server.stop()
+        self.finished_serving.wait()
+        self.thread.join()
+
     
     def verify(self):
         """Close down the server and verify that this MockHTTP has met all its
