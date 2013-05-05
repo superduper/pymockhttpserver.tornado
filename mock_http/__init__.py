@@ -17,13 +17,13 @@
 """Build a mock HTTP server that really works to unit test web service-dependent programs."""
 
 #import BaseHTTPServer
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import copy
 import select
 import socket
 import time
 import threading
-
+import logging as log
 from cherrypy.wsgiserver import CherryPyWSGIServer
 from cherrypy._cptree import Tree
 from cherrypy import request, response
@@ -36,9 +36,10 @@ POST = 'POST'
 PUT = 'PUT'
 DELETE = 'DELETE'
 
-never = object()
-once = object()
-at_least_once = object()
+ExpectedTime = namedtuple('ExpectedTimes', 'times name') 
+never = ExpectedTime(0, "never")
+once = ExpectedTime(1, "once")
+at_least_once = ExpectedTime(1, "at_least_once")
 
 def _server_thread(server, finished_serving):
     """Handle requests to our server in another thread."""
@@ -133,6 +134,7 @@ class Expectation(object):
             self.response_body = body
         if headers is not None:
             self.response_headers = headers
+        log.debug("Will respond with code=%s, headers=%s, body=%s at %s", http_code, headers, body, self)
         return self
     
     def check(self, method, path, params, headers, body):
@@ -186,7 +188,8 @@ class Expectation(object):
         elif self.times is once and self.invoked:
             raise AlreadyRetrievedURLException('%s %s twice, expected once' %\
                                                (method, path))
-        elif isinstance(self.times, int) and self.invoked_times != self.times:
+        elif isinstance(self.times, int) and self.invoked_times >= self.times \
+                and (self.times > 0 and not self.invoked):
             raise UnexpectedURLException('%s %s %s times, expected %s times' %\
                                        (method, path, self.invoked_times, self.times))
     
@@ -205,6 +208,10 @@ class Expectation(object):
         self.invoked = True
         self.invoked_times += 1
         return self.response_body
+
+    def __repr__(self):
+        return "<Expectation at %s method=%s, path=%s, times=%s>" % \
+                (id(self), self.method, self.path, self.times )
 
 class MockHTTP(object):
     """A Mock HTTP Server for unit testing web services calls.
@@ -233,8 +240,10 @@ class MockHTTP(object):
             target=_server_thread, kwargs={'server': self.server,
                                            'finished_serving': self.finished_serving})
         self.thread.start()
+        log.debug("Starting %s", self) 
         while not self.server.ready:
             time.sleep(0.1)
+        log.debug("Started %s", self) 
         self.reset()
     
     def expects(self, method, path, *args, **kwargs):
@@ -266,6 +275,7 @@ class MockHTTP(object):
         """
         expectation = Expectation(self, method, path, *args, **kwargs)
         self.expected[method][path] = expectation
+        log.debug("Added expectation: %s at %s", expectation, self)
         return expectation
 
     def reset(self):
@@ -275,13 +285,15 @@ class MockHTTP(object):
         self.last_failure = None
         self.expected = defaultdict(dict)
         self.expected_by_name = {}
+        log.debug("Reset expectations MockHTTP %s", self)
 
     def shutdown(self):
         """Close down the server""" 
+        log.debug("Shutting down %s", self)
         self.server.stop()
         self.finished_serving.wait()
         self.thread.join()
-
+        log.debug("Shutdown %s: Ok", self)
     
     def verify(self):
         """Close down the server and verify that this MockHTTP has met all its
@@ -291,15 +303,18 @@ class MockHTTP(object):
         :raises MockHTTPExpectationFailure: Or a subclass, describing the last\
         unexpected thing that happened."""
         if self.shutdown_on_verify:
+            log.debug("Shutting down before verify %s", self)
             self.shutdown()
         if self.last_failure is not None:
             raise self.last_failure
         import sys
         for method, expected in self.expected.iteritems():
             for path, expectation in expected.iteritems():
-                if (expectation.times is once or\
-                    expectation.times is at_least_once) and\
-                   not expectation.invoked:
+                if expectation.times is once or\
+                    ((expectation.times is at_least_once)  or
+                     ((isinstance(expectation.times, int) and 
+                       expectation.invoked_times != expectation.times))
+                     ) and not expectation.invoked:
                     raise UnretrievedURLException("%s not %s" % (path, method))
         return True
     
@@ -313,13 +328,21 @@ class MockHTTP(object):
         request is unexpected.
         :returns: The :class:`Expectation` object that expects this request."""
         try:
+            log.debug("Looking for [%s %s] at expectations", method, path) 
             if path not in self.expected[method]:
+                log.debug("Didnt found [%s %s] at expectations", method, path) 
                 raise UnexpectedURLException('Unexpected URL: %s' % path)
             expectation = self.expected[method][path]
+            log.debug("Found [%s %s] matching expectation %s", method, path, expectation) 
             if expectation.check(method, path, params, headers, body):
                 return expectation
+        except UnexpectedURLException, failure:
+            self.last_failure = failure
+            log.debug("Check failed at [%s %s] with %s", method, path, failure) 
+            raise
         except MockHTTPExpectationFailure, failure:
             self.last_failure = failure
+            log.debug("Expectation %s check failed at [%s %s] with %s", expectation, method, path, failure) 
             raise
 
 def mock_fail(mock, path, message=None):
@@ -349,4 +372,7 @@ class MockRoot(object):
         except MockHTTPExpectationFailure, failure:
             return mock_fail(self.mock, path, failure)
     default.exposed = True
+
+
+
 
