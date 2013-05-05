@@ -276,6 +276,7 @@ class MockHTTP(object):
         self.thread.join()
         if self.last_failure is not None:
             raise self.last_failure
+        import sys
         for method, expected in self.expected.iteritems():
             for path, expectation in expected.iteritems():
                 if (expectation.times is once or\
@@ -309,6 +310,8 @@ def mock_fail(mock, path, message=None):
     response.status = '404 %s' % message
     return '404 %s' % message
 
+HTTP_METHODS_WITH_NO_BODY = ("GET", "HEAD")
+
 class MockRoot(object):
     def __init__(self, mock):
         self.mock = mock
@@ -316,7 +319,8 @@ class MockRoot(object):
     def default(self, *args, **params):
         path = '/' + '/'.join(args)
         try:
-            if request.body:
+            if not request.method in HTTP_METHODS_WITH_NO_BODY \
+               and request.body:
                 body = request.body.read()
             else:
                 body = ''
