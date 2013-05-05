@@ -107,6 +107,7 @@ class Expectation(object):
         self.response_body = ''
         self.times = times
         self.invoked = False
+        self.invoked_times = 0
         self.failure = None
         self.name = name
         if name is not None:
@@ -185,6 +186,9 @@ class Expectation(object):
         elif self.times is once and self.invoked:
             raise AlreadyRetrievedURLException('%s %s twice, expected once' %\
                                                (method, path))
+        elif isinstance(self.times, int) and self.invoked_times != self.times:
+            raise UnexpectedURLException('%s %s %s times, expected %s times' %\
+                                       (method, path, self.invoked_times, self.times))
     
     def _check_order(self, method, path):
         if self.after is not None and not self.after.invoked:
@@ -199,6 +203,7 @@ class Expectation(object):
         for header, value in self.response_headers.iteritems():
             response.headers[header] = value
         self.invoked = True
+        self.invoked_times += 1
         return self.response_body
 
 class MockHTTP(object):
@@ -213,9 +218,10 @@ class MockHTTP(object):
          urlopen('http://localhost:42424/asdf') # HTTPError: 404
          mock_server.verify()"""
     
-    def __init__(self, port):
+    def __init__(self, port, shutdown_on_verify=True):
         """Create a MockHTTP server listening on localhost at the given port."""
         self.server_address = ('localhost', port)
+        self.shutdown_on_verify = shutdown_on_verify
         self.finish_serving = threading.Event()
         self.finished_serving = threading.Event()
         tree = Tree()
@@ -229,9 +235,7 @@ class MockHTTP(object):
         self.thread.start()
         while not self.server.ready:
             time.sleep(0.1)
-        self.last_failure = None
-        self.expected = defaultdict(dict)
-        self.expected_by_name = {}
+        self.reset()
     
     def expects(self, method, path, *args, **kwargs):
         """Declares an HTTP Request that this MockHTTP expects.
@@ -264,6 +268,14 @@ class MockHTTP(object):
         self.expected[method][path] = expectation
         return expectation
 
+    def reset(self):
+        """
+        Clears expectations
+        """
+        self.last_failure = None
+        self.expected = defaultdict(dict)
+        self.expected_by_name = {}
+
     def shutdown(self):
         """Close down the server""" 
         self.server.stop()
@@ -278,9 +290,8 @@ class MockHTTP(object):
         :returns: True, if all went as expected.
         :raises MockHTTPExpectationFailure: Or a subclass, describing the last\
         unexpected thing that happened."""
-        self.server.stop()
-        self.finished_serving.wait()
-        self.thread.join()
+        if self.shutdown_on_verify:
+            self.shutdown()
         if self.last_failure is not None:
             raise self.last_failure
         import sys
@@ -338,3 +349,4 @@ class MockRoot(object):
         except MockHTTPExpectationFailure, failure:
             return mock_fail(self.mock, path, failure)
     default.exposed = True
+
