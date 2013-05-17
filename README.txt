@@ -13,7 +13,7 @@ mock_http is a setuptools package distributed through the Python Package Index.
 
 To install from pypi:
 
-easy_install mock_http
+pip install mock_http
 
 Usage
 -----

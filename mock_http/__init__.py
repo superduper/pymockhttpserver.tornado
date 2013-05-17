@@ -16,17 +16,16 @@
 
 """Build a mock HTTP server that really works to unit test web service-dependent programs."""
 
-#import BaseHTTPServer
 from collections import defaultdict, namedtuple
 import copy
-import select
-import socket
-import time
-import threading
 import logging as log
-from cherrypy.wsgiserver import CherryPyWSGIServer
-from cherrypy._cptree import Tree
-from cherrypy import request, response
+import socket
+import threading
+from tornado import netutil
+from tornado.httpserver import HTTPServer
+from tornado.ioloop import IOLoop
+from tornado.web import RequestHandler, Application
+
 
 __all__ = ['GET', 'POST', 'PUT', 'DELETE', 'never', 'once', 'at_least_once',
            'MockHTTP']
@@ -36,15 +35,40 @@ POST = 'POST'
 PUT = 'PUT'
 DELETE = 'DELETE'
 
-ExpectedTime = namedtuple('ExpectedTimes', 'times name') 
-never = ExpectedTime(0, "never")
-once = ExpectedTime(1, "once")
-at_least_once = ExpectedTime(1, "at_least_once")
+class ExpectedTime(object):
 
-def _server_thread(server, finished_serving):
-    """Handle requests to our server in another thread."""
-    server.start()
-    finished_serving.set()
+    def passes_test(self, invoked_times):
+        raise NotImplementedError
+
+class times(ExpectedTime):
+
+    def __init__(self, times):
+        self.times = times
+
+    def passes_test(self, invoked_times):
+        return invoked_times == self.times
+
+class at_least(ExpectedTime):
+
+    def __init__(self, times):
+        self.times = times
+
+    def passes_test(self, invoked_times):
+        return invoked_times >= self.times
+
+at_least_once = at_least(1)
+once = times(1)
+never = times(0)
+
+def bind_unused_port():
+    """Binds a server socket to an available port on localhost.
+
+    Returns a tuple (socket, port).
+    """
+    [sock] = netutil.bind_sockets(0, 'localhost', family=socket.AF_INET)
+    port = sock.getsockname()[1]
+    return sock, port
+
 
 class MockHTTPException(Exception):
     """Raised when something unexpected goes wrong in MockHTTP's guts."""
@@ -200,18 +224,25 @@ class Expectation(object):
                                        (method, path,
                                         self.after.method, self.after.path))
     
-    def respond(self):
+    def response_data(self):
         """Respond to a request."""
-        response.status = self.response_code
-        for header, value in self.response_headers.iteritems():
-            response.headers[header] = value
         self.invoked = True
         self.invoked_times += 1
-        return self.response_body
+        return (self.response_code, self.response_headers, self.response_body)
 
     def __repr__(self):
         return "<Expectation at %s method=%s, path=%s, times=%s>" % \
                 (id(self), self.method, self.path, self.times )
+
+def _http_server_thread(mock, io_loop):
+    mock.server = HTTPServer(
+        Application([
+            (r".*", MockHandler, {"mock": mock})
+        ], debug=True), io_loop=io_loop
+    )
+    mock.server.add_sockets([mock.sock])
+    mock.server.start()
+    io_loop.start()
 
 class MockHTTP(object):
     """A Mock HTTP Server for unit testing web services calls.
@@ -225,27 +256,24 @@ class MockHTTP(object):
          urlopen('http://localhost:42424/asdf') # HTTPError: 404
          mock_server.verify()"""
     
-    def __init__(self, port, shutdown_on_verify=True):
+    def __init__(self, shutdown_on_verify=True):
         """Create a MockHTTP server listening on localhost at the given port."""
-        self.server_address = ('localhost', port)
         self.shutdown_on_verify = shutdown_on_verify
-        self.finish_serving = threading.Event()
-        self.finished_serving = threading.Event()
-        tree = Tree()
-        mock_root = MockRoot(self)
-        tree.mount(mock_root, '/')
-        self.server = CherryPyWSGIServer(
-            self.server_address, tree, server_name='localhost', numthreads=1)
-        self.thread = threading.Thread(
-            target=_server_thread, kwargs={'server': self.server,
-                                           'finished_serving': self.finished_serving})
-        self.thread.start()
-        log.debug("Starting %s", self) 
-        while not self.server.ready:
-            time.sleep(0.1)
-        log.debug("Started %s", self) 
+        self._server_io_loop = IOLoop()
         self.reset()
-    
+        self.sock, self.port = bind_unused_port()
+        self.server_address = "http://localhost:%s" % self.port
+        self._server_is_down = False
+        self.thread = threading.Thread(target=_http_server_thread,
+                                       kwargs=dict(io_loop=self._server_io_loop, mock=self))
+        self.thread.start()
+
+    def get_url(self, path):
+        if not path.startswith("/"):
+            return self.get_url("/" + path)
+        return self.server_address + path
+
+
     def expects(self, method, path, *args, **kwargs):
         """Declares an HTTP Request that this MockHTTP expects.
         
@@ -288,12 +316,14 @@ class MockHTTP(object):
         log.debug("Reset expectations MockHTTP %s", self)
 
     def shutdown(self):
-        """Close down the server""" 
-        log.debug("Shutting down %s", self)
-        self.server.stop()
-        self.finished_serving.wait()
-        self.thread.join()
-        log.debug("Shutdown %s: Ok", self)
+        """Close down the server"""
+        if not self._server_is_down:
+            log.debug("Shutting down %s", self)
+            self._server_io_loop.stop()
+            log.debug("Shutdown %s: Ok", self)
+            self._server_is_down = True
+        else:
+            log.debug("Attempt to shut down server when its already down")
     
     def verify(self):
         """Close down the server and verify that this MockHTTP has met all its
@@ -307,14 +337,11 @@ class MockHTTP(object):
             self.shutdown()
         if self.last_failure is not None:
             raise self.last_failure
-        import sys
         for method, expected in self.expected.iteritems():
             for path, expectation in expected.iteritems():
-                if expectation.times is once or\
-                    ((expectation.times is at_least_once)  or
-                     ((isinstance(expectation.times, int) and 
-                       expectation.invoked_times != expectation.times))
-                     ) and not expectation.invoked:
+                if (isinstance(expectation.times, int) and expectation.times != expectation.invoked_times) or \
+                   (isinstance(expectation.times, ExpectedTime)
+                    and not expectation.times.passes_test(expectation.invoked_times)):
                     raise UnretrievedURLException("%s not %s" % (path, method))
         return True
     
@@ -329,50 +356,80 @@ class MockHTTP(object):
         :returns: The :class:`Expectation` object that expects this request."""
         try:
             log.debug("Looking for [%s %s] at expectations", method, path) 
-            if path not in self.expected[method]:
-                log.debug("Didnt found [%s %s] at expectations", method, path) 
-                raise UnexpectedURLException('Unexpected URL: %s' % path)
             expectation = self.expected[method][path]
             log.debug("Found [%s %s] matching expectation %s", method, path, expectation) 
             if expectation.check(method, path, params, headers, body):
                 return expectation
-        except UnexpectedURLException, failure:
+        except KeyError:
+            failure = UnexpectedURLException('Unexpected URL: %s' % path)
             self.last_failure = failure
-            log.debug("Check failed at [%s %s] with %s", method, path, failure) 
-            raise
+            log.debug("Didnt found [%s %s] at expectations", method, path)
+            raise failure
         except MockHTTPExpectationFailure, failure:
             self.last_failure = failure
             log.debug("Expectation %s check failed at [%s %s] with %s", expectation, method, path, failure) 
             raise
 
-def mock_fail(mock, path, message=None):
-    """Standardized mechanism for reporting failure."""
-    mock.failed_url = path
-    response.status = '404 %s' % message
-    return '404 %s' % message
 
-HTTP_METHODS_WITH_NO_BODY = ("GET", "HEAD")
 
-class MockRoot(object):
-    def __init__(self, mock):
+class MockHandler(RequestHandler):
+
+    def initialize(self, mock):
         self.mock = mock
-    
-    def default(self, *args, **params):
-        path = '/' + '/'.join(args)
+
+
+    def head(self, *args, **kwargs):
+        return self.on_request() 
+
+    def get(self, *args, **kwargs):
+        return self.on_request()
+
+    def post(self, *args, **kwargs):
+        return self.on_request() 
+
+    def delete(self, *args, **kwargs):
+        return self.on_request() 
+
+    def patch(self, *args, **kwargs):
+        return self.on_request() 
+
+    def put(self, *args, **kwargs):
+        return self.on_request() 
+
+    def options(self, *args, **kwargs):
+        return self.on_request() 
+
+    @property
+    def all_arguments(self):
+        r = dict()
+        for k in self.request.arguments.iterkeys():
+            v = self.get_argument(name=k)
+            r[k]=v
+        return r
+
+    def on_request(self):
+        r = self.request
+
         try:
-            if not request.method in HTTP_METHODS_WITH_NO_BODY \
-               and request.body:
-                body = request.body.read()
-            else:
-                body = ''
-            return self.mock.is_expected(request.method, path, params,
-                                         request.headers, body).respond()
+            status, headers, body = self.mock.is_expected(
+                r.method, r.path, self.all_arguments,
+                r.headers, r.body
+            ).response_data()
+
+            self.set_status(status)
+            map(lambda s: self.set_header(*s), headers.items())
+            log.debug("Served with :%s " % body)
+            self.finish(body)
+
         except MockHTTPException, failure:
-            return mock_fail(self.mock, path, failure)
+            return self.mock_fail(failure)
         except MockHTTPExpectationFailure, failure:
-            return mock_fail(self.mock, path, failure)
-    default.exposed = True
+            return self.mock_fail(failure)
 
-
+    def mock_fail(self, message=None):
+        """Standardized mechanism for reporting failure."""
+        self.mock.failed_url = self.request.path
+        self.set_status(404)
+        self.finish('404 %s' % message)
 
 
