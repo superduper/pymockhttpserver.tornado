@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 import sys, os
 
-version = '1.1'
+version = '1.2'
 
 setup(name='mock_http',
       version=version,
@@ -22,7 +22,7 @@ setup(name='mock_http',
       keywords='',
       author='Nick Pilon',
       author_email='npilon@oreilly.com',
-      url='https://github.com/oreillymedia/pymockhttpserver',
+      url='https://github.com/superduper/pymockhttpserver.tornad',
       license='Apache 2',
       packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
       include_package_data=True,
