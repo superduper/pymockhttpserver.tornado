@@ -44,14 +44,19 @@ class TestTornadoAppWithMockHttp(AsyncHTTPTestCase):
                 try:
                     resp = client.fetch(HTTPRequest(
                         method="GET",
-                        url=url
+                        url=url,
+                        request_timeout=1,
+                        connect_timeout=1
                     ))
                 except HTTPError, e:
                     if e.code == 599:
-                        raise
+                        self.set_status(500, reason=str(e))
+                        self.finish(str(e))
+                        return
                     else:
                         self.set_status(e.code)
-                        return str(e)
+                        self.finish(str(e))
+                        return
                 self.set_status(resp.code)
                 log.debug("got response: %s" % resp.body)
                 self.finish(resp.body)
@@ -64,6 +69,13 @@ class TestTornadoAppWithMockHttp(AsyncHTTPTestCase):
         self.mock.expects(GET, path='/foo.bar.baz', times=once).will(body="boom!")
         resp = self.fetch("/boom!")
         self.assertEquals(resp.body, "boom!")
+        self.mock.verify()
+
+    def test_mock_timeout_call(self):
+        self.mock.expects(GET, path='/foo.bar.baz', times=once).will(body="boom!", delay=3)
+        resp = self.fetch("/boom!")
+        self.assertEquals(resp.body, "HTTP 599: Timeout")
+        self.assertEquals(resp.code, 500)
         self.mock.verify()
 
     def tearDown(self):

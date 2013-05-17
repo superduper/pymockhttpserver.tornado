@@ -21,6 +21,7 @@ import copy
 import logging as log
 import socket
 import threading
+import time
 from tornado import netutil
 from tornado.httpserver import HTTPServer
 from tornado.ioloop import IOLoop
@@ -127,6 +128,7 @@ class Expectation(object):
         # Ensure that nothing else can modify these after the mock is created.
         self.request_params = copy.copy(params)
         self.request_headers = copy.copy(headers)
+        self.response_delay = 0
         self.response_code = 200
         self.response_headers = {}
         self.response_body = ''
@@ -142,7 +144,7 @@ class Expectation(object):
         else:
             self.after = None
     
-    def will(self, http_code=None, headers=None, body=None):
+    def will(self, http_code=None, headers=None, body=None, delay=0):
         """Specifies what to do in response to a matching request.
         
         :param http_code: The HTTP code to send. *Default:* 200 OK.
@@ -159,6 +161,7 @@ class Expectation(object):
         if headers is not None:
             self.response_headers = headers
         log.debug("Will respond with code=%s, headers=%s, body=%s at %s", http_code, headers, body, self)
+        self.response_delay = delay
         return self
     
     def check(self, method, path, params, headers, body):
@@ -228,6 +231,8 @@ class Expectation(object):
         """Respond to a request."""
         self.invoked = True
         self.invoked_times += 1
+        if self.response_delay > 0 :
+            time.sleep(self.response_delay)
         return (self.response_code, self.response_headers, self.response_body)
 
     def __repr__(self):
