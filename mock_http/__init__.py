@@ -22,11 +22,12 @@ import logging as log
 import socket
 import threading
 import time
-from tornado import netutil
+from tornado import netutil, web
 from tornado.httpserver import HTTPServer
 from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler, Application
-
+from functools import partial
+import datetime
 
 __all__ = ['GET', 'POST', 'PUT', 'DELETE', 'never', 'once', 'at_least_once',
            'MockHTTP']
@@ -231,9 +232,8 @@ class Expectation(object):
         """Respond to a request."""
         self.invoked = True
         self.invoked_times += 1
-        if self.response_delay > 0 :
-            time.sleep(self.response_delay)
-        return (self.response_code, self.response_headers, self.response_body)
+        return (self.response_code, self.response_headers,
+                self.response_body, self.response_delay)
 
     def __repr__(self):
         return "<Expectation at %s method=%s, path=%s, times=%s>" % \
@@ -242,7 +242,7 @@ class Expectation(object):
 def _http_server_thread(mock, io_loop):
     mock.server = HTTPServer(
         Application([
-            (r".*", MockHandler, {"mock": mock})
+            (r".*", MockHandler, {"mock": mock, "io_loop": io_loop})
         ], debug=True), io_loop=io_loop
     )
     mock.server.add_sockets([mock.sock])
@@ -379,30 +379,37 @@ class MockHTTP(object):
 
 class MockHandler(RequestHandler):
 
-    def initialize(self, mock):
+    def initialize(self, mock, io_loop):
         self.mock = mock
+        self.io_loop = io_loop
 
-
+    @web.asynchronous
     def head(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
+    @web.asynchronous
     def get(self, *args, **kwargs):
-        return self.on_request()
+        self.on_request()
 
+    @web.asynchronous
     def post(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
+    @web.asynchronous
     def delete(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
+    @web.asynchronous
     def patch(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
+    @web.asynchronous
     def put(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
+    @web.asynchronous
     def options(self, *args, **kwargs):
-        return self.on_request() 
+        self.on_request()
 
     @property
     def all_arguments(self):
@@ -412,24 +419,36 @@ class MockHandler(RequestHandler):
             r[k]=v
         return r
 
+    @web.asynchronous
     def on_request(self):
         r = self.request
 
         try:
-            status, headers, body = self.mock.is_expected(
+            status, headers, body, delay = self.mock.is_expected(
                 r.method, r.path, self.all_arguments,
                 r.headers, r.body
             ).response_data()
 
             self.set_status(status)
             map(lambda s: self.set_header(*s), headers.items())
-            log.debug("Served with :%s " % body)
-            self.finish(body)
+            if delay > 0 :
+                log.debug("delay with %s" % delay)
+                deadline = datetime.timedelta(seconds=delay)
+                log.debug("scheduled timeout at %s" % time.time())
+                self.io_loop.add_timeout(deadline, partial(self.respond, body, halt=True))
+            else:
+                self.respond(body)
 
         except MockHTTPException, failure:
             return self.mock_fail(failure)
         except MockHTTPExpectationFailure, failure:
             return self.mock_fail(failure)
+
+    def respond(self, body, halt=False):
+        log.debug("Served with :%s at %s" % (body, time.time()))
+        self.finish(body)
+        if halt:
+            raise Exception("Halt!")
 
     def mock_fail(self, message=None):
         """Standardized mechanism for reporting failure."""
