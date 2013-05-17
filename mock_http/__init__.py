@@ -435,7 +435,7 @@ class MockHandler(RequestHandler):
                 log.debug("delay with %s" % delay)
                 deadline = datetime.timedelta(seconds=delay)
                 log.debug("scheduled timeout at %s" % time.time())
-                self.io_loop.add_timeout(deadline, partial(self.respond, body, halt=True))
+                self.io_loop.add_timeout(deadline, partial(self.respond, body))
             else:
                 self.respond(body)
 
@@ -444,11 +444,9 @@ class MockHandler(RequestHandler):
         except MockHTTPExpectationFailure, failure:
             return self.mock_fail(failure)
 
-    def respond(self, body, halt=False):
+    def respond(self, body):
         log.debug("Served with :%s at %s" % (body, time.time()))
         self.finish(body)
-        if halt:
-            raise Exception("Halt!")
 
     def mock_fail(self, message=None):
         """Standardized mechanism for reporting failure."""
