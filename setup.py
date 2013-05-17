@@ -30,8 +30,7 @@ setup(name='mock_http',
       test_suite='nose.collector',
       install_requires=[
           # -*- Extra requirements: -*-
-          'cherrypy',
-          'httplib2',
+          'tornado',
       ],
       entry_points="""
       # -*- Entry points: -*-
